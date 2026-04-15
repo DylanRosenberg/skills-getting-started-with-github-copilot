@@ -1,26 +1,10 @@
-"""
-High School Management System API
+import copy
+from fastapi.testclient import TestClient
+import pytest
 
-A super simple FastAPI application that allows students to view and sign up
-for extracurricular activities at Mergington High School.
-"""
+from src.app import app, activities
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
-import os
-from pathlib import Path
-
-app = FastAPI(title="Mergington High School API",
-              description="API for viewing and signing up for extracurricular activities")
-
-# Mount the static files directory
-current_dir = Path(__file__).parent
-app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
-          "static")), name="static")
-
-# In-memory activity database
-activities = {
+INITIAL_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -78,44 +62,67 @@ activities = {
 }
 
 
-@app.get("/")
-def root():
-    return RedirectResponse(url="/static/index.html")
+@pytest.fixture(autouse=True)
+def reset_activities():
+    activities.clear()
+    activities.update(copy.deepcopy(INITIAL_ACTIVITIES))
+    yield
+    activities.clear()
+    activities.update(copy.deepcopy(INITIAL_ACTIVITIES))
 
 
-@app.get("/activities")
-def get_activities():
-    return activities
+@pytest.fixture
+def client():
+    return TestClient(app)
 
 
-@app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def test_get_activities_returns_all_activities(client):
+    response = client.get("/activities")
+    assert response.status_code == 200
 
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Validate student is not already signed up
-    if email in activity["participants"]:
-        raise HTTPException(status_code=400, detail="Student is already signed up for this activity")
-
-    # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+    data = response.json()
+    assert "Chess Club" in data
+    assert "Programming Class" in data
+    assert len(data) == 9
 
 
-@app.delete("/activities/{activity_name}/signup")
-def remove_participant(activity_name: str, email: str):
-    """Unregister a student from an activity"""
-    if activity_name not in activities:
-        raise HTTPException(status_code=404, detail="Activity not found")
+def test_signup_adds_participant(client):
+    response = client.post(
+        "/activities/Chess Club/signup",
+        params={"email": "newstudent@mergington.edu"}
+    )
+    assert response.status_code == 200
+    assert "Signed up" in response.json()["message"]
 
-    activity = activities[activity_name]
-    if email not in activity["participants"]:
-        raise HTTPException(status_code=404, detail="Participant not found for this activity")
+    data = client.get("/activities").json()
+    assert "newstudent@mergington.edu" in data["Chess Club"]["participants"]
 
-    activity["participants"].remove(email)
-    return {"message": f"Removed {email} from {activity_name}"}
+
+def test_signup_rejects_duplicate_email(client):
+    response = client.post(
+        "/activities/Chess Club/signup",
+        params={"email": "michael@mergington.edu"}
+    )
+    assert response.status_code == 400
+    assert "already signed up" in response.json()["detail"]
+
+
+def test_remove_participant_unregisters_student(client):
+    response = client.delete(
+        "/activities/Chess Club/signup",
+        params={"email": "michael@mergington.edu"}
+    )
+    assert response.status_code == 200
+    assert "Removed" in response.json()["message"]
+
+    data = client.get("/activities").json()
+    assert "michael@mergington.edu" not in data["Chess Club"]["participants"]
+
+
+def test_remove_participant_not_found_returns_404(client):
+    response = client.delete(
+        "/activities/Chess Club/signup",
+        params={"email": "nonexistent@mergington.edu"}
+    )
+    assert response.status_code == 404
+    assert "Participant not found" in response.json()["detail"]
